@@ -2,11 +2,11 @@
 
 namespace MediaWiki\Extension\Bucket;
 
-use Article;
 use MediaWiki\Html\TemplateParser;
 use MediaWiki\MediaWikiServices;
+use MediaWiki\Page\Article;
 use MediaWiki\SpecialPage\SpecialPage;
-use Mediawiki\Title\Title;
+use MediaWiki\Title\Title;
 use Wikimedia\Rdbms\DBQueryTimeoutError;
 
 class BucketPage extends Article {
@@ -107,7 +107,10 @@ class BucketPage extends Article {
 					$this->templateParser, $schemas[$bucketName], $fullResult['fields'], $queryResult ),
 				'diveText' => $linkRenderer->makePreloadedLink(
 					SpecialPage::getTitleValueFor( 'Bucket' ),
-					$out->msg( 'bucket-page-dive-text' )->parse(), '', [], [ 'bucket' => $bucketName ]
+					$out->msg( 'bucket-page-dive-text' )->text(),
+					'',
+					[],
+					[ 'bucket' => $bucketName ]
 				)
 			]
 		);

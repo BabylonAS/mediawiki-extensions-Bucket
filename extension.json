@@ -1,6 +1,6 @@
 {
 	"name": "Bucket",
-	"version": "2.0.0",
+	"version": "2.1.1",
 	"author": [
 		"Jonathan Lee",
 		"TehKittyCat",
@@ -12,30 +12,33 @@
 	"license-name": "GPL-2.0-or-later",
 	"type": "other",
 	"requires": {
-		"MediaWiki": ">= 1.43",
+		"MediaWiki": ">= 1.45",
 		"extensions": {
 			"Scribunto": "*"
 		}
 	},
+	"AutoloadClasses": {
+		"MediaWiki\\Extension\\Bucket\\CreateInitialSchemaForBucketIssues": "maintenance/CreateInitialSchemaForBucketIssues.php"
+	},
 	"AutoloadNamespaces": {
-		"MediaWiki\\Extension\\Bucket\\": "includes/",
-		"MediaWiki\\Extension\\Bucket\\Hooks\\Handlers": "includes/Hooks/Handlers"
+		"MediaWiki\\Extension\\Bucket\\": "includes/"
 	},
 	"namespaces": [
-			{
-				"id": 9592,
-				"constant": "NS_BUCKET",
-				"name": "Bucket",
-				"subpages": false,
-				"movable": false,
-				"defaultcontentmodel": "json",
-				"protection": "editbucket"
-			},
-			{
-				"id": 9593,
-				"constant": "NS_BUCKET_TALK",
-				"name": "Bucket_talk"
-			}
+		{
+			"id": 9592,
+			"constant": "NS_BUCKET",
+			"name": "Bucket",
+			"subpages": false,
+			"movable": false,
+			"defaultcontentmodel": "json",
+			"protection": "editbucket"
+		},
+		{
+			"id": 9593,
+			"constant": "NS_BUCKET_TALK",
+			"name": "Bucket_talk",
+			"subpages": true
+		}
 	],
 	"Hooks": {
 		"LinksUpdateComplete": "main",
@@ -53,11 +56,16 @@
 		"TitleIsAlwaysKnown": "main",
 		"AfterImportPage": "main",
 		"ParserClearState": "main",
-		"ParserLimitReportPrepare": "main"
+		"ParserLimitReportPrepare": "main",
+		"PageMoveComplete": "main"
 	},
 	"HookHandlers": {
 		"main": {
-			"class": "MediaWiki\\Extension\\Bucket\\Hooks\\Handlers\\GeneralHandler"
+			"class": "MediaWiki\\Extension\\Bucket\\Hooks\\Handlers\\GeneralHandler",
+			"services": [
+				"MainConfig",
+				"RevisionLookup"
+			]
 		},
 		"schema": {
 			"class": "MediaWiki\\Extension\\Bucket\\Hooks\\Handlers\\SchemaHandler"
@@ -67,7 +75,13 @@
 		"bucket": "MediaWiki\\Extension\\Bucket\\BucketAction"
 	},
 	"APIModules": {
-		"bucket": "MediaWiki\\Extension\\Bucket\\BucketApi"
+		"bucket": {
+			"class": "MediaWiki\\Extension\\Bucket\\BucketApi",
+			"services": [
+				"Scribunto.EngineFactory",
+				"ParserFactory"
+			]
+		}
 	},
 	"MessagesDirs": {
 		"Bucket": [
@@ -125,13 +139,18 @@
 		},
 		"BucketMaxDataPerPage": {
 			"value": 1000000
-		},
-		"BucketForceOldRepeatedQuery": {
-			"value": false
 		}
 	},
+	"AvailableRights": [
+		"editbucket"
+	],
 	"GroupPermissions": {
 		"sysop": {
+			"editbucket": true
+		}
+	},
+	"GrantPermissions": {
+		"editprotected": {
 			"editbucket": true
 		}
 	},

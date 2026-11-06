@@ -5,8 +5,8 @@ namespace MediaWiki\Extension\Bucket;
 use JsonSerializable;
 use LogicException;
 use MediaWiki\Logger\LoggerFactory;
-use MediaWiki\MediaWikiServices;
 use MediaWiki\Message\Message;
+use MediaWiki\Title\Title;
 use Wikimedia\Rdbms\IDatabase;
 use Wikimedia\Rdbms\IExpression;
 
@@ -14,21 +14,14 @@ class Bucket {
 	public const EXTENSION_DATA_KEY = 'bucket:puts';
 	public const EXTENSION_BUCKET_NAMES_KEY = 'bucket:puts_bucket_names';
 	public const ISSUES_BUCKET = 'bucket_issues';
-	public const REPEATED_CHARACTER_LIMIT = 512;
-	public const REPEATED_CHARACTER_TOTAL_LIMIT = 5254;
 	public const TEXT_BYTE_LIMIT = 65535;
-
-	public static function isForceOldRepeated(): bool {
-		$config = MediaWikiServices::getInstance()->getMainConfig();
-		return $config->get( 'BucketForceOldRepeatedQuery' );
-	}
 
 	private static function isValidName( string $name ): bool {
 		if (
 			// Disallow numeric names as the MW RDBMS treats numeric tables names as ints in some circumstances.
-			is_numeric( $name ) === false
+			!is_numeric( $name )
 			&& !str_starts_with( $name, '_' )
-			&& strpos( $name, '__' ) === false
+			&& !str_contains( $name, '__' )
 			&& preg_match( '/^[a-zA-Z0-9_]+$/D', $name )
 		) {
 			return true;
@@ -36,10 +29,8 @@ class Bucket {
 		return false;
 	}
 
-	public static function getValidFieldName( string $bucketName, ?string $fieldName ): string {
-		if ( $fieldName !== null
-			&& self::isValidName( $fieldName )
-		) {
+	public static function getValidFieldName( string $bucketName, string $fieldName ): string {
+		if ( self::isValidName( $fieldName ) ) {
 			$cleanName = strtolower( trim( $fieldName ) );
 			$dbw = BucketDatabase::getDB();
 			$fullName = $dbw->tableName( BucketDatabase::getSubTableName( $bucketName, $cleanName ), 'raw' );
@@ -90,7 +81,7 @@ class Bucket {
 	 * @param array $userInput
 	 * @return array
 	 */
-	public static function runSelect( array $userInput ): array {
+	public static function runSelect( array $userInput, ?Title $title ): array {
 		$query = new BucketQuery( $userInput );
 		$fieldNames = $query->getFields();
 		$selectQueryBuilder = $query->getSelectQueryBuilder();
@@ -107,7 +98,7 @@ class Bucket {
 		while ( $dataRow = $res->fetchRow() ) {
 			$resultRow = [];
 			foreach ( $dataRow as $key => $value ) {
-				if ( is_numeric( $key ) === false ) {
+				if ( !is_numeric( $key ) ) {
 					continue;
 				}
 				$field = $fieldNames[$key];
@@ -126,14 +117,12 @@ class Bucket {
 			$generalized_sql = $conds[0]->toGeneralizedSql();
 		}
 
-		$page = MediaWikiServices::getInstance()->getParser()->getPage();
-
 		LoggerFactory::getInstance( 'bucket' )->debug( 'bucket query',
 			[
 				'bucket_count' => count( $result ),
 				'bucket_sql' => $selectQueryBuilder->getSQL(),
 				'bucket_generalized_sql' => $generalized_sql,
-				'bucket_page' => $page ? $page->__toString() : null
+				'bucket_page' => $title ? $title->__toString() : null,
 			] );
 
 		return [ $result, $sql_string ];
@@ -304,22 +293,11 @@ class BucketSchemaField implements JsonSerializable {
 			}
 			$value = array_values( $value );
 			$outputValues = [];
-			$totalLength = 0;
 			foreach ( $value as $single ) {
 				if ( $single === null ) {
 					continue;
 				}
-				$single = strval( $single );
-				$outputValues[] = $single;
-				if ( strlen( $single ) > Bucket::REPEATED_CHARACTER_LIMIT ) {
-					throw new BucketException( wfMessage( 'bucket-put-repeated-too-long' )
-							->numParams( Bucket::REPEATED_CHARACTER_LIMIT ) );
-				}
-				$totalLength = $totalLength + strlen( $single );
-			}
-			if ( $totalLength > Bucket::REPEATED_CHARACTER_TOTAL_LIMIT ) {
-				throw new BucketException( wfMessage( 'bucket-put-repeated-total-too-long' )
-					->numParams( $totalLength, Bucket::REPEATED_CHARACTER_TOTAL_LIMIT ) );
+				$outputValues[] = $this->castSubValueForDatabase( $single );
 			}
 			if ( count( $outputValues ) === 0 ) {
 				return null;
@@ -355,8 +333,12 @@ class BucketSchemaField implements JsonSerializable {
 			case DatabaseValueType::Integer:
 				return intval( $value );
 			case DatabaseValueType::Boolean:
+				$bool_value = filter_var( $value, FILTER_VALIDATE_BOOL, FILTER_NULL_ON_FAILURE );
+				if ( $bool_value === null ) {
+					return null;
+				}
 				// MySQL uses 1 for true, 0 for false
-				return (int)filter_var( $value, FILTER_VALIDATE_BOOL );
+				return (int)$bool_value;
 			default:
 				return null;
 		}
@@ -403,8 +385,8 @@ class BucketException extends LogicException {
 	private Message $wfMessage;
 
 	public function __construct( Message $wfMessage ) {
-		parent::__construct( $wfMessage );
-		$this->wfMessage = $wfMessage;
+		$this->wfMessage = $wfMessage->inContentLanguage();
+		parent::__construct( $this->wfMessage );
 	}
 
 	public function getwfMessage(): Message {

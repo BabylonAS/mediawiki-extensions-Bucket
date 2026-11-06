@@ -6,9 +6,8 @@ Bucket was developed as a lightweight alternative to [Semantic MediaWiki](https:
 Bucket aims to be simpler in nature, by providing a very straight forward interface for wiki editors to store structured data, an easy-to-learn SQL-like syntax in Lua for accessing the data, and crucially, not redeveloping the wheel and riding on top of existing MediaWiki concepts where possible (such as RDBMS access, purging, etc).
 
 ## Requirements
-* MediaWiki 1.43+
-* MySQL 8.0.17+.
-  * MariaDB, PostgreSQL and SQLite are currently not supported.
+* MediaWiki 1.45+
+* MySQL has been fully tested. MariaDB, PostgreSQL and SQLite may work but have not been tested.
 * [Scribunto](https://github.com/wikimedia/mediawiki-extensions-Scribunto)
 
 ## Installing
@@ -20,8 +19,12 @@ Bucket is still under active development, and the API and schema are unstable an
 ```sql
 CREATE USER 'bucket'@'<SERVER_HOSTNAME>' IDENTIFIED BY '<PASSWORD>';
 ```
-4. Ensure the configuration variables are set correctly (see table below)
-5. Run `php maintenance/run.php Bucket:SetupDBPermission` to setup required database permissions
+4. Grant the wiki's own database user (`$wgDBuser`) the `GRANT OPTION` on the wiki database, so Bucket can delegate access to the Bucket user, e.g
+```sql
+GRANT ALL PRIVILEGES ON `<WIKI_DATABASE>`.* TO '<WIKI_DB_USER>'@'<SERVER_HOSTNAME>' WITH GRANT OPTION;
+```
+5. Ensure the configuration variables are set correctly (see table below)
+6. Run `php maintenance/run.php Bucket:SetupDBPermission` to setup required database permissions
 
 ## Configuration
  | Variable | Description | Default
@@ -29,7 +32,7 @@ CREATE USER 'bucket'@'<SERVER_HOSTNAME>' IDENTIFIED BY '<PASSWORD>';
  | $wgBucketDBuser | The username Bucket will use to connect to the database. | None
  | $wgBucketDBpassword | The password for the Bucket database user. | None
  | $wgBucketDBhostname | The hostname for the Bucket database user. | `%`
- | $wgBucketMaxQueryExecutionTime | The maximum time in milliseconds that an individual query is allowed to run before timing out. | `500`
+ | $wgBucketMaxQueryExecutionTime | The maximum time in milliseconds that an individual query is allowed to run before timing out. | `2,000`
  | $wgBucketMaxPageExecutionTime | The maximum time in milliseconds that Bucket is allowed to execute per page parse. | `10,000`
  | $wgBucketMaxDataPerPage | The maximum amount of data storable by a single page, counted as the length of the JSON encoded data. | `1,000,000`
  | $wgBucketWriteEnabledNamespaces | An array of namespaces that Bucket will write data from. | (Main), User, Project, File, Help, and Category

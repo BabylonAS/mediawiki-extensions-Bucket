@@ -26,6 +26,7 @@ class SetupDBPermission extends Maintenance {
 		$this->addOption( 'dry-run', 'Only print the commands without executing them.', false, false );
 	}
 
+	/** @inheritDoc */
 	public function execute() {
 		$config = MediaWikiServices::getInstance()->getMainConfig();
 		$bucketDBuser = $this->getOption( 'bucket_user', $config->get( 'BucketDBuser' ) );
@@ -41,9 +42,11 @@ class SetupDBPermission extends Maintenance {
 
 		$query = [];
 
-		// We only need to be able to select from the categorylinks table.
-		$categoryLinksTable = $dbw->tableName( 'categorylinks' );
-		$query[] = "GRANT SELECT ON `$dbName`.$categoryLinksTable TO $fullUserName;";
+		// We only need to be able to select from the categorylinks and linktarget tables.
+		$selectTables = [ $dbw->tableName( 'categorylinks' ), $dbw->tableName( 'linktarget' ) ];
+		foreach ( $selectTables as $table ) {
+			$query[] = "GRANT SELECT ON `$dbName`.$table TO $fullUserName;";
+		}
 
 		// These tables we want to select, insert, and delete rows.
 		$specialTables = [ $dbw->tableName( 'bucket_pages' ), $dbw->tableName( 'bucket_schemas' ) ];
@@ -68,7 +71,7 @@ class SetupDBPermission extends Maintenance {
 			if ( !$this->getOption( 'dry-run' ) ) {
 				try {
 					$this->output( $singleQuery . "\n" );
-					$dbw->query( $singleQuery );
+					$dbw->query( $singleQuery, __METHOD__ );
 				} catch ( DBQueryError $e ) {
 					if ( str_contains( $e->getMessage(), 'denied to user' ) ) {
 						$this->output(

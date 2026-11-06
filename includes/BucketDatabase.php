@@ -8,10 +8,10 @@ use Wikimedia\Rdbms\IDatabase;
 use Wikimedia\Rdbms\IMaintainableDatabase;
 
 class BucketDatabase {
-	private static IMaintainableDatabase $db;
+	private static ?IMaintainableDatabase $db = null;
 
 	public static function getDB(): IMaintainableDatabase {
-		if ( isset( self::$db ) && self::$db->isOpen() ) {
+		if ( self::$db !== null && self::$db->isOpen() ) {
 			return self::$db;
 		}
 		$config = MediaWikiServices::getInstance()->getMainConfig();
@@ -20,6 +20,12 @@ class BucketDatabase {
 
 		if ( $bucketDBuser === null || $bucketDBpassword === null ) {
 			throw new ConfigException( 'BucketDBuser and BucketDBpassword are required config options' );
+		}
+
+		if ( defined( 'MW_PHPUNIT_TEST' ) ) {
+			self::$db = MediaWikiServices::getInstance()->getDBLoadBalancer()
+				->getMaintenanceConnectionRef( DB_PRIMARY );
+			return self::$db;
 		}
 
 		$mainDB = MediaWikiServices::getInstance()->getDBLoadBalancer()->getConnection( DB_PRIMARY );
@@ -56,7 +62,7 @@ class BucketDatabase {
 			->caller( __METHOD__ )
 			->field( 'schema_json' )
 			->fetchField();
-		$tableExists = $dbw->tableExists( self::getBucketTableName( $bucketName ) );
+		$tableExists = $dbw->tableExists( self::getBucketTableName( $bucketName ), __METHOD__ );
 		if ( !$schemaExists && !$tableExists ) {
 			return true;
 		} else {
@@ -96,12 +102,12 @@ class BucketDatabase {
 			throw new SchemaException( wfMessage( 'bucket-already-exist-error' ) );
 		}
 
-		if ( empty( (array)$jsonSchema ) ) {
+		if ( (array)$jsonSchema === [] ) {
 			throw new SchemaException( wfMessage( 'bucket-schema-no-fields-error' ) );
 		}
 
 		foreach ( $jsonSchema as $fieldName => $fieldData ) {
-			if ( gettype( $fieldName ) !== 'string' ) {
+			if ( !is_string( $fieldName ) ) {
 				throw new SchemaException( wfMessage( 'bucket-schema-must-be-strings', $fieldName ) );
 			}
 
@@ -117,17 +123,9 @@ class BucketDatabase {
 					wfMessage( 'bucket-schema-invalid-data-type', $fieldName, $fieldData->type ) );
 			}
 
-			$index = true;
-			if ( isset( $fieldData->index ) ) {
-				$index = boolval( $fieldData->index );
-			}
-
-			$repeated = false;
-			if ( isset( $fieldData->repeated ) ) {
-				$repeated = boolval( $fieldData->repeated );
-			}
-
-			if ( $repeated === true && $index === false ) {
+			$index = $fieldData->index ?? true;
+			$repeated = $fieldData->repeated ?? false;
+			if ( $repeated && !$index ) {
 				throw new SchemaException( wfMessage( 'bucket-schema-repeated-must-be-indexed', $fieldName ) );
 			}
 
@@ -141,8 +139,9 @@ class BucketDatabase {
 		$bucketSchema = new BucketSchema( $bucketName, $newSchema );
 		$dbw = self::getDB();
 
-		$dbw->onTransactionCommitOrIdle( function () use ( $dbw, $bucketSchema ) {
-			if ( !$dbw->tableExists( $bucketSchema->getTableName() ) ) {
+		$methodName = __METHOD__;
+		$dbw->onTransactionCommitOrIdle( function () use ( $dbw, $bucketSchema, $methodName ) {
+			if ( !$dbw->tableExists( $bucketSchema->getTableName(), $methodName ) ) {
 				// We are a new bucket json
 				$statements = self::getCreateTableStatement( $bucketSchema, $dbw );
 			} else {
@@ -156,14 +155,15 @@ class BucketDatabase {
 					$escapedTableName = $dbw->tableName( $table['permissionName'] );
 					// Note: The main database connection is only used to grant access to the new table.
 					MediaWikiServices::getInstance()->getDBLoadBalancer()
-						->getConnection( DB_PRIMARY )->query( "GRANT ALL ON $escapedTableName TO $bucketDBuser;" );
+						->getConnection( DB_PRIMARY )
+						->query( "GRANT ALL ON $escapedTableName TO $bucketDBuser;", $methodName );
 				}
-				$dbw->query( $table['statement'] );
+				$dbw->query( $table['statement'], $methodName );
 			}
 
 			// At this point is is possible that another transaction has changed the table so we start a transaction,
 			// read the column comments (which are the schema), and write that to bucket_schemas
-			$dbw->begin();
+			$dbw->begin( $methodName );
 			$commentSchema = self::buildSchemaFromComments( $bucketSchema->getName(), $dbw );
 			// If the schema contained in the comments is eqivalent to what we expect (ignoring field ordering)
 			// then we just write the expected schema, to preserve the ordering from the MW page.
@@ -181,9 +181,10 @@ class BucketDatabase {
 				'bucket_schemas',
 				[ 'bucket_name' => $bucketSchema->getName(), 'schema_json' => $schemaJson ],
 				'bucket_name',
-				[ 'schema_json' => $schemaJson ]
+				[ 'schema_json' => $schemaJson ],
+				$methodName,
 			);
-			$dbw->commit();
+			$dbw->commit( $methodName );
 		}, __METHOD__ );
 	}
 
@@ -210,10 +211,10 @@ class BucketDatabase {
 				( ( $field->getSubDatabaseValueType() !== $oldField->getSubDatabaseValueType() )
 				|| ( $field->getDatabaseValueType() !== $oldField->getDatabaseValueType() ) );
 
-			if ( $newColumn === false ) {
+			if ( !$newColumn ) {
 				# If the old schema has an index, check if it needs to be dropped
-				if ( $oldField !== null && $oldField->getIndexed() ) {
-					if ( $typeChange || $field->getIndexed() === false ) {
+				if ( $oldField !== null && $oldField->getIndexed() && !$oldField->getRepeated() ) {
+					if ( $typeChange || !$field->getIndexed() ) {
 						$alterTableFragments[] = "DROP INDEX $escapedFieldName";
 					}
 				}
@@ -246,8 +247,8 @@ class BucketDatabase {
 					$alterTableFragments[] = "MODIFY $escapedFieldName $newDbType COMMENT $fieldJson";
 				}
 			}
-			if ( $field->getIndexed() ) {
-				if ( $newColumn || $typeChange || $oldFields[$fieldName]->getIndexed() === false ) {
+			if ( $field->getIndexed() && !$field->getRepeated() ) {
+				if ( $newColumn || $typeChange || !$oldFields[$fieldName]->getIndexed() ) {
 					$alterTableFragments[] = 'ADD ' . self::getIndexStatement( $field, $dbw );
 				}
 			}
@@ -257,9 +258,7 @@ class BucketDatabase {
 		foreach ( $oldFields as $deletedColumn => $val ) {
 			$escapedDeletedColumn = $dbw->addIdentifierQuotes( $deletedColumn );
 			$alterTableFragments[] = "DROP $escapedDeletedColumn";
-			if ( $val->getRepeated() === true ) {
-				// We must explicitly drop indexes for repeated fields
-				$alterTableFragments[] = "DROP INDEX $escapedDeletedColumn";
+			if ( $val->getRepeated() ) {
 				$repeatedTableName = $dbw->tableName(
 					self::getSubTableName( $bucketSchema->getName(), $val->getFieldName() ) );
 				$tableStatements[] = [
@@ -283,12 +282,12 @@ class BucketDatabase {
 		foreach ( $newSchema->getFields() as $field ) {
 			$dbType = $field->getDatabaseValueType()->value;
 			$fieldJson = $dbw->addQuotes( json_encode( $field ) );
-			if ( $field->getRepeated() === true ) {
+			if ( $field->getRepeated() ) {
 				$tableStatements[] = self::getCreateRepeatedTableStatement( $newSchema, $field, $dbw );
 			}
 			$createTableFragments[] =
 				"{$dbw->addIdentifierQuotes($field->getFieldName())} $dbType COMMENT $fieldJson";
-			if ( $field->getIndexed() ) {
+			if ( $field->getIndexed() && !$field->getRepeated() ) {
 				$createTableFragments[] = self::getIndexStatement( $field, $dbw );
 			}
 		}
@@ -343,6 +342,8 @@ class BucketDatabase {
 			->table( 'bucket_pages' )
 			->lockInShareMode()
 			->where( [ 'bucket_name' => $bucketName ] )
+			// Increase max execution time, necessary for large wikis (> 300k bucket_pages rows)
+			->setMaxExecutionTime( 10000 )
 			->fetchRowCount();
 	}
 
@@ -364,7 +365,7 @@ class BucketDatabase {
 			$deleteTableNames = self::getBucketSubTableNames( $bucketName, $schema );
 			$deleteTableNames[] = self::getBucketTableName( $bucketName );
 			foreach ( $deleteTableNames as $name ) {
-				$dbw->dropTable( $name );
+				$dbw->dropTable( $name, __METHOD__ );
 			}
 		}
 		$dbw->newDeleteQueryBuilder()
@@ -376,9 +377,6 @@ class BucketDatabase {
 
 	private static function getIndexStatement( BucketSchemaField $field, IDatabase $dbw ): string {
 		$fieldName = $dbw->addIdentifierQuotes( $field->getFieldName() );
-		if ( $field->getDatabaseValueType() == DatabaseValueType::Json ) {
-			return "INDEX $fieldName((CAST($fieldName AS CHAR(512) ARRAY)))";
-		}
 		switch ( $field->getSubDatabaseValueType() ) {
 			case DatabaseValueType::Text:
 				// More than 40 characters can cause a MySQL error 1713: Undo log record is too big.

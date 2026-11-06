@@ -20,6 +20,7 @@ class LuaLibrary extends LibraryBase {
 		return self::$pageElapsedTime;
 	}
 
+	/** @inheritDoc */
 	public function register() {
 		$lib = [
 			'put' => [ $this, 'bucketPut' ],
@@ -52,7 +53,6 @@ class LuaLibrary extends LibraryBase {
 			} catch ( MalformedTitleException ) {
 				// Just ignore it, an error will be logged later
 			}
-			$bucketPuts[ $bucketName ] = [];
 		}
 		$uuid = MediaWikiServices::getInstance()->getGlobalIdGenerator()->newUUIDv4();
 		$parserOutput->appendExtensionData( Bucket::EXTENSION_DATA_KEY, $uuid );
@@ -70,7 +70,7 @@ class LuaLibrary extends LibraryBase {
 		$startTime = hrtime( true );
 		$maxTime = MediaWikiServices::getInstance()->getMainConfig()->get( 'BucketMaxPageExecutionTime' );
 		if ( self::$pageElapsedTime > $maxTime ) {
-			return [ 'error' => wfMessage( 'bucket-query-total-time-expired' )->text() ];
+			return [ 'error' => wfMessage( 'bucket-query-total-time-expired' )->inContentLanguage()->text() ];
 		}
 		try {
 			$this->linkToBucket( $data['bucketName'] );
@@ -78,14 +78,14 @@ class LuaLibrary extends LibraryBase {
 				$this->linkToBucket( $join['bucketName'] );
 			}
 			$data = self::convertFromLuaTable( $data );
-			$rows = Bucket::runSelect( $data );
+			$rows = Bucket::runSelect( $data, $this->getTitle() );
 			return [ self::convertToLuaTable( $rows ) ];
 		} catch ( BucketException $e ) {
 			return [ 'error' => $e->getMessage() ];
 		} catch ( DBQueryTimeoutError ) {
-			return [ 'error' => wfMessage( 'bucket-query-long-execution-time' )->text() ];
+			return [ 'error' => wfMessage( 'bucket-query-long-execution-time' )->inContentLanguage()->text() ];
 		} catch ( TypeError $e ) {
-			return [ 'error' => wfMessage( 'bucket-php-type-error', $e->getMessage() )->text() ];
+			return [ 'error' => wfMessage( 'bucket-php-type-error', $e->getMessage() )->inContentLanguage()->text() ];
 		} finally {
 			// Convert nanoseconds to milliseconds
 			self::$pageElapsedTime += (int)( ( hrtime( true ) - $startTime ) / 1000000 );
@@ -119,10 +119,8 @@ class LuaLibrary extends LibraryBase {
 		if ( is_array( $arr ) ) {
 			$luaTable = [];
 			foreach ( $arr as $key => $value ) {
-				if ( is_int( $key ) || is_string( $key ) ) {
-					$new_key = is_int( $key ) ? $key + 1 : $key;
-					$luaTable[$new_key] = self::convertToLuaTable( $value );
-				}
+				$new_key = is_int( $key ) ? $key + 1 : $key;
+				$luaTable[$new_key] = is_array( $value ) ? self::convertToLuaTable( $value ) : $value;
 			}
 			return $luaTable;
 		}
@@ -138,10 +136,8 @@ class LuaLibrary extends LibraryBase {
 		if ( is_array( $arr ) ) {
 			$luaTable = [];
 			foreach ( $arr as $key => $value ) {
-				if ( is_int( $key ) || is_string( $key ) ) {
-					$new_key = is_int( $key ) ? $key - 1 : $key;
-					$luaTable[$new_key] = self::convertFromLuaTable( $value );
-				}
+				$new_key = is_int( $key ) ? $key - 1 : $key;
+				$luaTable[$new_key] = is_array( $value ) ? self::convertFromLuaTable( $value ) : $value;
 			}
 			return $luaTable;
 		}

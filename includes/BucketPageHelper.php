@@ -25,9 +25,6 @@ class BucketPageHelper {
 	public static function runQuery(
 		WebRequest $existing_request, string $bucket, string $select, string $where, int $limit, int $offset
 	): array {
-		if ( $bucket === null ) {
-			return [ 'error' => wfMessage( 'bucket-empty-bucket-name' ) ];
-		}
 		try {
 			$bucket = Bucket::getValidBucketName( $bucket );
 		} catch ( SchemaException $e ) {
@@ -87,7 +84,7 @@ class BucketPageHelper {
 	}
 
 	/**
-	 * @return string - wikitext
+	 * @return string - html
 	 */
 	private static function formatValue( mixed $value, string $dataType, bool $repeated ): string {
 		if ( $repeated ) {
@@ -117,7 +114,7 @@ class BucketPageHelper {
 				return Html::rawElement(
 					'div', [ 'class' => $class ], $renderer->makePreloadedLink( $link ) );
 			} else {
-				return Html::rawElement(
+				return Html::element(
 					'div', [ 'class' => $class ], $value );
 			}
 		} elseif ( $dataType == 'BOOLEAN' ) {
@@ -133,12 +130,12 @@ class BucketPageHelper {
 	 * @param TemplateParser $templateParser
 	 * @param array $schema
 	 * @param array|null $fields
-	 * @param array $result
+	 * @param array|null $result
 	 * @return string - html
 	 */
 	public static function getResultTable(
 		TemplateParser $templateParser, array $schema, ?array $fields, ?array $result ): string {
-		if ( isset( $fields ) && count( $fields ) > 0 ) {
+		if ( $fields ) {
 			$keys = [];
 			$rows = [];
 
@@ -148,7 +145,7 @@ class BucketPageHelper {
 				}
 			}
 
-			if ( isset( $result ) ) {
+			if ( $result !== null ) {
 				foreach ( $result as $row ) {
 					$tr = [];
 					foreach ( $keys as $key ) {

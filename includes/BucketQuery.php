@@ -3,8 +3,8 @@
 namespace MediaWiki\Extension\Bucket;
 
 use InvalidArgumentException;
-use MediaWiki\Extension\Bucket\Expression\MemberOfExpression;
 use MediaWiki\Extension\Bucket\Expression\NotExpression;
+use MediaWiki\Linker\LinksMigration;
 use MediaWiki\MediaWikiServices;
 use MediaWiki\Title\Title;
 use Wikimedia\Rdbms\IDatabase;
@@ -33,13 +33,14 @@ class BucketQuery {
 	private BucketSchema $primarySchema;
 	private array $joins = [];
 	private array $selects = [];
-	private QueryNode $where;
+	private ?QueryNode $where = null;
 	private int $limit = self::DEFAULT_LIMIT;
 	private int $offset = 0;
 	private array $orderByFields = [];
 	private ?Selector $userOrderByField = null;
 	private string $orderByDirection = 'ASC';
 	private int $categoryCount = 0;
+	public bool $useLinkTarget = false;
 
 	/**
 	 * @param mixed $condition
@@ -84,6 +85,14 @@ class BucketQuery {
 	 * @param array $data
 	 */
 	public function __construct( array $data ) {
+		// Support for the categorylinks migration.
+		if ( array_key_exists( 'categorylinks', LinksMigration::$mapping ) ) {
+			$linksMigration = MediaWikiServices::getInstance()->getLinksMigration();
+			$queryInfo = $linksMigration->getQueryInfo( 'categorylinks' );
+			$this->useLinkTarget = in_array( 'linktarget', $queryInfo['tables'], true );
+		} else {
+			$this->useLinkTarget = false;
+		}
 		// Ensure schema cache is populated with all used buckets
 		$neededSchemas = [];
 		if ( !isset( self::$schemaCache[$data['bucketName']] ) ) {
@@ -95,7 +104,7 @@ class BucketQuery {
 			}
 		}
 		// Populate the schema cache with missing schemas
-		if ( !empty( $neededSchemas ) ) {
+		if ( $neededSchemas ) {
 			$dbw = BucketDatabase::getDB();
 			$res = $dbw->newSelectQueryBuilder()
 				->from( 'bucket_schemas' )
@@ -129,6 +138,7 @@ class BucketQuery {
 				throw new QueryException( wfMessage( 'bucket-query-invalid-join', json_encode( $join ) ) );
 			}
 			$joinTable = $join['bucketName'];
+			'@phan-var string $joinTable';
 			$field1 = $join['cond'][0];
 			$field2 = $join['cond'][1];
 			$schema = self::$schemaCache[$join['bucketName']];
@@ -200,14 +210,26 @@ class BucketQuery {
 
 	private function addCategoryJoin( string $category ) {
 		if ( !isset( $this->categories[$category] ) ) {
+			$categoryTitle = Title::newFromText( $category, NS_CATEGORY );
+			if ( !$categoryTitle ) {
+				throw new QueryException( wfMessage( 'bucket-query-invalid-category-name', $category ) );
+			}
+
 			$categoryAlias = 'category' . $this->categoryCount++;
 			$this->categories[$category] = $categoryAlias;
+			if ( $this->useLinkTarget ) {
+				$this->joins[] = new LinkTargetJoin( $category, $this );
+			}
 			$this->joins[] = new CategoryJoin( $category, $this );
 		}
 	}
 
 	public function getCategoryAlias( string $category ): string {
 		return $this->categories[$category];
+	}
+
+	public function getLinkTargetAlias( string $category ): string {
+		return $this->categories[$category] . '_lt';
 	}
 
 	public function getPrimaryBucket(): BucketSchema {
@@ -229,7 +251,7 @@ class BucketQuery {
 	}
 
 	private function getWhereSQL( IDatabase $dbw ): IExpression|array {
-		if ( isset( $this->where ) ) {
+		if ( $this->where !== null ) {
 			try {
 				return $this->where->getWhereSQL( $dbw );
 			} catch ( InvalidArgumentException $e ) {
@@ -249,8 +271,15 @@ class BucketQuery {
 			->from( BucketDatabase::getBucketTableName( $this->getPrimaryBucket()->getName() ) )
 			->caller( __METHOD__ );
 
+		$field_count = 0;
 		foreach ( $this->selects as $selector ) {
-			$builder->field( $selector->getSelectSQL( $dbw ) );
+			$uniqueAlias = str_replace( '.', '_', $selector->getUnsafe() ) . $field_count++;
+			$builder->field( $selector->getSelectSQL( $dbw ), $uniqueAlias );
+		}
+
+		// MySQL can only use 61 tables in a join (initial table + 60 joins)
+		if ( count( $this->joins ) > 60 ) {
+			throw new QueryException( wfMessage( 'bucket-query-join-limit', count( $this->joins ), 60 ) );
 		}
 
 		foreach ( $this->joins as $join ) {
@@ -265,7 +294,7 @@ class BucketQuery {
 		$builder->setMaxExecutionTime( $config->get( 'BucketMaxQueryExecutionTime' ) );
 
 		$orderByStrings = [];
-		if ( isset( $this->userOrderByField ) ) {
+		if ( $this->userOrderByField !== null ) {
 			$orderByStrings[] = $this->userOrderByField->getSafe( $dbw );
 		}
 		foreach ( $this->orderByFields as $field ) {
@@ -283,19 +312,9 @@ class BucketQuery {
 			$subquerySelectors = [];
 			foreach ( $condition['operands'] as $operand ) {
 				$child = $this->parseWhere( $operand );
-				// Temporary repeated field migration step
-				if ( Bucket::isForceOldRepeated() ) {
-					$children[] = $child;
-					continue;
-				}
-				// End temporary repeated field migration step
 				if ( $child instanceof ComparisonConditionNode ) {
 					$selector = $child->getSelector();
-					if (
-						$selector instanceof FieldSelector
-						&& $child->getValue() !== null
-						&& $selector->getFieldSchema()->getRepeated() === true
-					) {
+					if ( $selector instanceof FieldSelector && $selector->getFieldSchema()->getRepeated() ) {
 						$fieldName = $selector->getFieldSchema()->getFieldName();
 						if ( !isset( $subqueryChildren[$fieldName] ) ) {
 							$subqueryChildren[$fieldName] = [];
@@ -434,10 +453,46 @@ class CategoryJoin extends Join {
 	public function getSQL( IDatabase $dbw ): array {
 		$bucketTableName = $this->query->getPrimaryBucket()->getSafe( $dbw );
 		$categoryNameNoPrefix = Title::newFromText( $this->categoryName, NS_CATEGORY )->getDBkey();
-		return [
+		$safeAlias = $dbw->addIdentifierQuotes( $this->getAlias() );
+		$safeLinkTargetAlias = $dbw->addIdentifierQuotes( $this->query->getLinkTargetAlias( $this->categoryName ) );
+		$conds = [
 			// Must be all in one string to avoid the table name being treated as a string value.
-			"{$dbw->addIdentifierQuotes( $this->getAlias() )}.cl_from = $bucketTableName._page_id",
-			"{$this->categorySelector->getSafe($dbw)}" => $categoryNameNoPrefix
+			"$safeAlias.cl_from = $bucketTableName._page_id",
+			"$safeLinkTargetAlias.lt_id = $safeAlias.cl_target_id",
+		];
+		if ( !$this->query->useLinkTarget ) {
+			$conds["{$this->categorySelector->getSafe($dbw)}"] = $categoryNameNoPrefix;
+		}
+		return $conds;
+	}
+}
+
+class LinkTargetJoin extends Join {
+	private string $categoryName;
+	private BucketQuery $query;
+
+	public function __construct( string $categoryName, BucketQuery $query ) {
+		if ( !BucketQuery::isCategory( $categoryName ) ) {
+			throw new QueryException( wfMessage( 'bucket-query-expected-category', $categoryName ) );
+		}
+		$this->categoryName = $categoryName;
+		$this->query = $query;
+	}
+
+	public function getJoinTable( IDatabase $dbw ): string {
+		return $dbw->tableName( 'linktarget' );
+	}
+
+	public function getAlias(): string {
+		return $this->query->getLinkTargetAlias( $this->categoryName );
+	}
+
+	public function getSQL( IDatabase $dbw ): array {
+		$categoryNameNoPrefix = Title::newFromText( $this->categoryName, NS_CATEGORY )->getDBkey();
+		$safeAlias = $dbw->addIdentifierQuotes( $this->getAlias() );
+		return [
+			"$safeAlias.lt_namespace" => NS_CATEGORY,
+			"$safeAlias.lt_title" => $categoryNameNoPrefix,
 		];
 	}
 }
@@ -529,19 +584,13 @@ class ComparisonConditionNode extends QueryNode {
 		$selector = $this->selector;
 		$op = $this->operator->getOperator();
 		$value = $this->value->getValue();
-
-		// Temporary repeated field migration
-		if ( Bucket::isForceOldRepeated()
-			&& $selector instanceof FieldSelector
-			&& $value !== null
-			&& $selector->getFieldSchema()->getRepeated() === true
-		) {
-			if ( $op === '=' || $op === '!=' ) {
-				return new MemberOfExpression( $selector->getUnsafe(), $op, strval( $value ) );
-			}
+		// If we are comparing a value with a text field, convert the value to a string
+		// this prevents MySQL from trying to convert every row of the field to a different type
+		if ( $selector instanceof FieldSelector
+			&& $selector->getFieldSchema()->getSubDatabaseValueType() == DatabaseValueType::Text
+			&& $value !== null ) {
+			$value = strval( $value );
 		}
-		// End temporary repeated field migration
-
 		return $dbw->expr( $selector->getUnsafe(), $op, $value );
 	}
 
@@ -641,11 +690,19 @@ class CategorySelector extends Selector {
 	}
 
 	public function getSafe( IDatabase $dbw ): string {
-		return $dbw->addIdentifierQuotes( $this->query->getCategoryAlias( $this->categoryName ) ) . '.cl_to';
+		if ( $this->query->useLinkTarget ) {
+			return $dbw->addIdentifierQuotes( $this->query->getCategoryAlias( $this->categoryName ) ) . '.cl_target_id';
+		} else {
+			return $dbw->addIdentifierQuotes( $this->query->getCategoryAlias( $this->categoryName ) ) . '.cl_to';
+		}
 	}
 
 	public function getUnsafe(): string {
-		return $this->query->getCategoryAlias( $this->categoryName ) . '.cl_to';
+		if ( $this->query->useLinkTarget ) {
+			return $this->query->getCategoryAlias( $this->categoryName ) . '.cl_target_id';
+		} else {
+			return $this->query->getCategoryAlias( $this->categoryName ) . '.cl_to';
+		}
 	}
 
 	public function getSelectSQL( IDatabase $dbw ): string {
